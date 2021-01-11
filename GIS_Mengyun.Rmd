@@ -1,0 +1,681 @@
+---
+title: "Correlation between the percentage of green and blue space and the elderly population density: based on London ward level"
+author: Mengyun Zeng
+date: January 1, 2021
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## GIS final assessment
+
+This is an R Markdown document. 
+
+
+library packages
+```{r library, message=FALSE}
+library(tidyverse)
+library(tmap)
+library(geojsonio)
+library(plotly)
+library(rgdal)
+library(broom)
+library(mapview)
+library(crosstalk)
+library(sf)
+library(sp)
+library(spdep)
+library(car)
+library(fs)
+library(janitor)
+library(spatialreg)
+library(corrr)
+library(grid)
+library(dplyr)
+library(spgwr)
+```
+
+## part 1: data
+
+### 1.1 read in csv:
+1.Firstly,download shapefile data of London from https://data.london.gov.uk/download/statistical-gis-boundary-files-london/ then read it in.
+
+2.Secondly, the percent of green cover from https://data.london.gov.uk/dataset/green-and-blue-cover. This data set is conduct by landsat 8 data from USGS website using NDVI method.
+
+3.Then, the population data from https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/wardlevelmidyearpopulationestimatesexperimental
+
+4.Additionally, to better help reader to understand which area is based in the analysis, I use the World cities shapfile Download from https://hub.arcgis.com/datasets/6996f03a1b364dbab4008d99380370ed_0
+
+```{r csv, include=FALSE}
+Londonwards_2018<-dir_info(here::here("data","London-wards-2018","London-wards-2018_ESRI"
+))%>%
+  #$ means exact match
+  dplyr::filter(str_detect(path,"London_Ward_CityMerged.shp$"))%>%
+  dplyr::select(path)%>%
+  pull()%>%
+  #read in the file in
+  st_read()
+#green
+green_cover_ward <- read_csv(here::here("data","green_cover_ward_summary_0.05.csv"))
+#population and 65+
+old_people_ward <- read_csv(here::here("data","old.csv"))
+
+```
+### 1.2 gather the data
+use the left_jion function to gather all the dataset to a dataframe with a index of GSS_CODE
+```{r}
+Lonwardgreen <- Londonwards_2018%>%
+  left_join(.,
+            green_cover_ward, 
+            by = c("GSS_CODE" = "ward_code"))
+#gather all variables
+df <-
+  left_join(Lonwardgreen,
+            old_people_ward  %>% dplyr::select("Ward Code 1","65_plus"), 
+            by = c("GSS_CODE" = "Ward Code 1")
+  )
+
+
+#clean names
+df<-df %>%
+  clean_names()
+
+df <- df %>%
+  mutate( old_density = round(x65_plus/hectares,2) )
+
+
+
+  
+
+  
+
+```
+
+Search on the website to find the information about whether the ward is in inner London or outer London. Then, use the mutate function to create a new columns to save the results. Notably, using the case_when function to distinguish where the wards are in: if the ward is in inner London, tag it with o, if the ward is in outer London tag it with 1. This is used to set the inner_outer London as our dummy variable.
+
+```{r}
+# mutate a new column as the dummy variable
+innerlondon=c('Camden','Greenwich','Hackney','Hammersmith and Fulham','Islington','City and County of the City of London','Kensington and Chelsea','Lambeth','Lewisham','Southwark','Tower Hamlets','Wandsworth','City of Westminster')
+outerlondon=c('Barking and Dagenham','Barnet','Bexley','Brent','Bromley','Croydon','Ealing','Enfield','Haringey','Harrow','Havering','Hillingdon','Hounslow','Kingston upon Thames','Merton','Newham','Redbridge','Richmond upon Thames','Sutton','Waltham Forest')
+
+df <- df %>%
+  mutate(
+    inner_outer = case_when(
+      district %in% innerlondon ~ 0,
+      district %in% outerlondon ~ 1
+    )
+  )
+```
+
+Using tmap to see the distribution of the dummy variable: inner and outer London.
+Check if we miss some ward without tags.
+
+```{r}
+qtm(df, 
+    fill = "inner_outer", 
+    borders = NULL,  
+    fill.palette = "Blues")
+```
+
+
+
+```{r show, eval=FALSE, include=FALSE}
+qtm(df, 
+    fill = "percent_green", 
+    borders = NULL,  
+    fill.palette = "YlGn")
+qtm(df, 
+    fill = "percent_blue", 
+    borders = NULL,  
+    fill.palette = "Blues")
+qtm(df, 
+    fill = "x65_plus", 
+    borders = NULL,  
+    fill.palette = "Oranges")
+
+```
+
+
+Using boxplot to check the outlier
+But I would not delete the outlier, because I think every ward in London needs to be analysis.
+```{r}
+##explore outliers
+par(mfrow=c(1, 3))  # divide graph area in 3 columns
+percent_green <- boxplot(df$percent_green, main="Boxplot of green space",
+                        ylab="green space (%)",col = "#69b3a2")
+percent_blue <- boxplot(df$percent_blue, main="Boxplot of blue space",
+                        ylab="blue space (%)",col = "#56B4E9")
+x65_plus <- boxplot(df$x65_plus, main="Boxplot of aging 65+",
+                        ylab="old_density",col = "#E69F00")
+```
+
+To better help reader to understand which area is based in the analysis, plot the location of London in UK
+```{r}
+UK_outline <- st_read(here::here("data", 
+                                 "gadm36_GBR_shp", 
+                                 "gadm36_GBR_0.shp")) %>%
+  st_transform(., 27700)
+Worldcities <- st_read(here::here("data", 
+                                  "World_Cities", 
+                                  "a4013257-88d6-4a68-b916-234180811b2d202034-1-1fw6kym.nqo.shp")) %>%
+  st_transform(., 27700)
+
+Worldcities2 <- Worldcities %>%
+  filter(CNTRY_NAME=='United Kingdom'&
+           Worldcities$CITY_NAME=='London')
+
+newbb <- c(xmin=-296000, ymin=5408, xmax=655696, ymax=1000000)
+
+UK_outlinecrop <- UK_outline$geometry %>%
+  st_crop(., newbb)
+
+
+
+
+inset = tm_shape(UK_outlinecrop) + tm_polygons() +
+  tm_borders(col = "grey40", lwd = 3)+
+  tm_layout(frame=F,bg.color = "transparent")+
+  tm_shape(Worldcities2) +
+  tm_symbols(col = "red", scale = .5)+
+  tm_text("CITY_NAME", xmod=-1.5, ymod=-0.5)+
+  tm_scale_bar(position = c("right", "bottom"), text.size = .5)+
+  tm_compass(type = "8star", position = c("right","top"))
+  
+  
+
+inset
+
+```
+
+
+tmap the varailables, to see the distribution.
+
+```{r}
+#green
+tm_shape(df) +
+  tm_polygons(col="percent_green",
+              style = "pretty",
+              palette = "YlGn",
+              legend.hist = TRUE,
+              border.alpha = 0.1,
+              legend.hist.title = "Frequency of percent of green",
+              title="Percent Green",
+              n=6) +
+  
+  tm_layout(  legend.hist.bg.color = '#dedede',
+              legend.title.size = 0.8,
+              legend.outside.size=0.5,
+              legend.outside = T,
+              legend.outside.position = 'right',
+              frame=F,
+              title = "(a) Percent of Green Space", title.position = c("left","bottom"),
+              title.size = 0.9
+  ) +
+  tm_scale_bar(position = c(0.00, 0.00), text.size = 0.40)+
+  tm_compass(type = "8star", size = 1, position = c(0.00, 0.1))
+#blue
+
+tm_shape(df) +
+  tm_polygons(col="percent_blue",
+              style = "fixed",
+              palette = "Blues",
+              legend.hist = TRUE,
+              border.alpha = 0.1,
+              legend.hist.title = "Frequency of percent of Blue",
+              title="Percent Blue",
+              breaks = c(0,0.1,0.3,0.5,1,10,100)) +
+  
+  tm_layout(  legend.hist.bg.color = '#dedede',
+              legend.title.size = 0.8,
+              legend.outside.size=0.5,
+              legend.outside = T,
+              legend.outside.position = 'right',
+              frame=F,
+              title = "(b) Percent of Blue Space", title.position = c("left","bottom"),
+              title.size = 0.9
+  ) +
+  tm_scale_bar(position = c(0.00, 0.00), text.size = 0.40)+
+  tm_compass(type = "8star", size = 1, position = c(0.00, 0.1))
+
+
+#aging
+tm_shape(df) +
+  tm_polygons(col="old_density",
+              style = "jenks",
+              palette = "Oranges",
+              legend.hist = TRUE,
+              border.alpha = 0.1,
+              legend.hist.title = "Frequency of 65+ denisty",
+              title="65+ density") +
+  
+  tm_layout(  legend.hist.bg.color = '#dedede',
+              legend.title.size = 0.8,
+              legend.outside.size=0.5,
+              legend.outside = T,
+              legend.outside.position = 'right',
+              frame=F,
+              title = "(c) Elderly population density", title.position = c("left","bottom"),
+              title.size = 0.9
+  ) +
+  tm_scale_bar(position = c(0.00, 0.00), text.size = 0.40)+
+  tm_compass(type = "8star", size = 1, position = c(0.00, 0.1))
+```
+
+
+The blue space is a bit mass, so I plot the blue space more spacifically
+```{r}
+
+percent <- c(0,.01,.1,.5,.9,.99,1)
+
+var <- df["percent_blue"] %>% st_set_geometry(NULL)
+quantile(var[,1],percent)
+get.var <- function(vname,df) {
+  # function to extract a variable as a vector out of an sf data frame
+  # arguments:
+  #    vname: variable name (as character, in quotes)
+  #    df: name of sf data frame
+  # returns:
+  #    v: vector with values (without a column name)
+  v <- df[vname] %>% st_set_geometry(NULL)
+  v <- unname(v[,1])
+  return(v)
+}
+percent <- c(0,.01,.1,.5,.9,.99,1)
+var <- get.var("percent_blue",df)
+bperc <- quantile(var,percent)
+tm_shape(df) +
+  tm_fill("percent_blue",title="Percent Blue",breaks=bperc,palette="-RdBu",
+          legend.hist = TRUE,
+          legend.hist.title = "Frequency of Blue Space",
+          labels=c("< 1%", "1% - %10", "10% - 50%", "50% - 90%","90% - 99%", "> 99%"))  +
+  tm_borders() +
+  tm_layout(title = "(b) Blue Space Percentile Map", 
+            title.position = c("left","bottom"),
+            legend.title.size = 0.8,
+            legend.outside.size=0.5,
+            legend.outside = T,
+            legend.outside.position = c("right","bottom"),
+            frame=F,
+            title.size = 0.8)+
+  tm_scale_bar(position = c(0.00, 0.00), text.size = 0.40)+
+  tm_compass(type = "8star", size = 1, position = c(0.00, 0.1))
+```
+
+
+### 1.3 The Frequency Distributions
+
+To better regression, it's suggest that the variable should be normal distrbution, and we can see that the data of elderly population density and the percentage of green space is normal distribution while the percentage of blue space is left skewed distribution. But it's hard for the data of percentage of blue space to using a lag or -1 power of function since there are 85 wards with 0.00 blues pace. So I leave it as well.
+```{r echo=FALSE}
+#people
+ggplot(df , aes(x =  x65_plus/hectares)) + 
+  geom_histogram(aes(y = ..density..),
+                 binwidth = 0.5) + 
+  geom_density(colour="red", 
+               size=1, 
+               adjust=1)
+
+#green
+ggplot(df , aes(x =  percent_green)) + 
+  geom_histogram(aes(y = ..density..),
+                 binwidth = 2) + 
+  geom_density(colour="red", 
+               size=1, 
+               adjust=1)
+ggplot(df , aes(x = (percent_blue))) + 
+  geom_histogram(aes(y = ..density..),
+                 binwidth = 0.5) + 
+  geom_density(colour="red", 
+               size=1, 
+               adjust=1)
+
+symbox(~percent_blue, 
+       df, 
+       na.rm=T,
+       powers=seq(-3,3,by=.5))
+
+```
+
+
+### 1.4 Pearson correlation
+
+Just to see if there is a crrelation between the variables.
+```{r}
+cor.test(df$x65_plus/df$hectares, df$percent_green, method="pearson")
+cor.test(df$x65_plus/df$hectares, df$percent_blue, method="pearson")
+```
+
+
+## part 2:  regression model
+
+### 2.1 OLS(ordinary least squares) model
+run the ols model to see the correlation
+```{r message=FALSE, warning=FALSE}
+#model
+Regressiondata<- df%>%
+  clean_names()%>%
+  dplyr::select(x65_plus,hectares,percent_green,percent_blue,inner_outer)
+
+model <- lm(x65_plus/hectares ~ 
+              percent_green+
+              percent_blue+
+              inner_outer, 
+            data = Regressiondata)
+
+#show the summary of those outputs
+glance(model)
+tidy(model)
+vif(model)
+summary(model)
+par(mfrow=c(2,2))    #plot to 2 by 2 array
+plot(model)
+```
+
+save the residuals into the dataframe for later use, and check the distributioon. A good regression must has residuals with normal distribution.
+```{r}
+model_data <- model %>%
+  augment(., Regressiondata)
+
+#write the residuals out
+# also add them to the shapelayer
+df <- df %>%
+  mutate(modelresids = residuals(model))
+
+#plot residuals
+model_data %>%
+  dplyr::select(.resid)%>%
+  pull()%>%
+  qplot()+ 
+  geom_histogram() 
+```
+
+Durbin-Watson test to check whether residuals are correlated
+
+```{r}
+DW <- durbinWatsonTest(model)
+tidy(DW)
+```
+
+The result of DW test should better between 1 and 3.
+we can see the result is less than 2, which indicating postitve autocorrelation.
+
+Then, to check for the spatial autocorrelation I run the Moran's I
+
+```{r}
+#calculate the centroids of all Wards in London
+coordsW <- df%>%
+  st_centroid()%>%
+  st_geometry()
+#par(mfrow=c(1,1))
+#plot(coordsW)
+
+#generate a spatial weights matrix. 
+#simple binary matrix of queen's case neighbours
+LWard_nb <- df %>%
+  poly2nb(., queen=T)
+
+#or nearest neighbours
+knn_wards <-coordsW %>%
+  knearneigh(., k=4)
+
+LWard_knn <- knn_wards %>%
+  knn2nb()
+
+#plot them
+#plot(LWard_nb, st_geometry(coordsW), col="red")
+#plot(LWard_knn, st_geometry(coordsW), col="blue")
+
+#create a spatial weights matrix object from these weights
+Lward.queens_weight <- LWard_nb %>%
+  nb2listw(., style="C")
+Lward.knn_4_weight <- LWard_knn %>%
+  nb2listw(., style="C")
+
+#9.5.10
+Queen <- df %>%
+  st_drop_geometry()%>%
+  dplyr::select(modelresids)%>%
+  pull()%>%
+  moran.test(., Lward.queens_weight)%>%
+  tidy()
+Nearest_neighbour <- df %>%
+  st_drop_geometry()%>%
+  dplyr::select(modelresids)%>%
+  pull()%>%
+  moran.test(., Lward.knn_4_weight)%>%
+  tidy()
+
+Queen
+#0.475
+Nearest_neighbour
+#0.554
+```
+
+Observing the Moran’s I statistic for both Queen’s case neighbours and k-nearest neighbours of 4, we can see that the Moran’s I statistic are 0.474 and 0.554. Moran’s I ranges from between -1 and +1 (0 indicating no spatial autocorrelation), so we can conclude that there is some moderate spatial autocorrelation in our residuals.
+
+### 2.2 The Spatial Lag (lagged dependent variable) model
+
+Firstly, run the SLM with queen's lagged
+```{r}
+#queen
+slag_dv_model_queen <- lagsarlm(x65_plus/hectares ~ 
+                                   percent_green+
+                                   percent_blue+
+                                  inner_outer, 
+                                 data = df, 
+                                 nb2listw(LWard_nb, style="C"), 
+                                 method = "eigen")
+
+#what do the outputs show?
+tidy(slag_dv_model_queen)
+glance(slag_dv_model_queen)
+summary(slag_dv_model_queen)
+t<-summary(slag_dv_model_queen)
+
+
+```
+
+Then, run the SLM with lag from k-nearest neighbors of 4
+```{r}
+#knn4
+slag_dv_model_knn4 <- lagsarlm(x65_plus/hectares ~ 
+                                  percent_green+
+                                  percent_blue+
+                                 inner_outer, 
+                                data = df, 
+                                nb2listw(LWard_knn, 
+                                         style="C"), 
+                                method = "eigen")
+
+#what do the outputs show?
+tidy(slag_dv_model_knn4)
+glance(slag_dv_model_knn4)
+summary(slag_dv_model_knn4)
+t4 <-summary(slag_dv_model_knn4)
+```
+
+
+write out the residuals
+```{r}
+df <- df %>%
+  mutate(slag_dv_model_knn_resids = residuals(slag_dv_model_knn4))
+#qtm(df, fill = "slag_dv_model_knn_resids")
+
+KNN4Moran <- df %>%
+  st_drop_geometry()%>%
+  dplyr::select(slag_dv_model_knn_resids)%>%
+  pull()%>%
+  moran.test(., Lward.knn_4_weight)%>%
+  tidy()
+
+KNN4Moran
+```
+
+seems better,and what about the Queen?
+```{r}
+df <- df %>%
+  mutate(slag_dv_model_queen_resids = residuals(slag_dv_model_queen))
+#qtm(df, fill = "slag_dv_model_queen_resids")
+
+queenMoran <- df %>%
+  st_drop_geometry()%>%
+  dplyr::select(slag_dv_model_queen_resids)%>%
+  pull()%>%
+  moran.test(., Lward.queens_weight)%>%
+  tidy()
+
+queenMoran
+```
+
+
+
+### 2.3 The Spatial Error Model
+```{r}
+#SEM_model
+sem_model <- errorsarlm(x65_plus/hectares ~ 
+                          percent_green+
+                          percent_blue+
+                          inner_outer, 
+                        data = df,
+                        nb2listw(LWard_knn, style="C"), 
+                        method = "eigen")
+tidy(sem_model)
+glance(sem_model)
+summary(sem_model)
+```
+
+Seen from the results, the SEM model has the best output.
+let's see how the Morans'I
+```{r}
+df <- df %>%
+  mutate(sem_model_knn_resids = residuals(sem_model))
+#qtm(df, fill = "sem_model_knn_resids")
+
+semMoran <- df %>%
+  st_drop_geometry()%>%
+  dplyr::select(sem_model_knn_resids)%>%
+  pull()%>%
+  moran.test(., Lward.knn_4_weight)%>%
+  tidy()
+
+semMoran
+
+```
+
+
+### 2.4 Geographically Weighted Regression Models (GWR)
+
+I run the GWR to overcome the spatial autocorrelation
+```{r}
+library(spgwr)
+
+st_crs(df) = 27700
+
+dfSP <- df %>%
+  as(., "Spatial")
+
+st_crs(coordsW) = 27700
+coordsWSP <- coordsW %>%
+  as(., "Spatial")
+coordsWSP
+
+#calculate kernel bandwidth
+GWRbandwidth <- gwr.sel(x65_plus/hectares ~ 
+                          percent_green+
+                          percent_blue+
+                          inner_outer, 
+                        data = dfSP, 
+                        coords=coordsWSP,
+                        adapt=T)
+
+#run the gwr model
+gwr.model = gwr(x65_plus/hectares ~ 
+                  percent_green+
+                  percent_blue+
+                  inner_outer, 
+                data = dfSP, 
+                coords=coordsWSP, 
+                adapt=GWRbandwidth, 
+                hatmatrix=TRUE, 
+                se.fit=TRUE)
+
+gwr.model
+```
+
+GWR's Moran's I
+```{r}
+
+gwr.morantest(gwr.model,Lward.knn_4_weight)
+
+```
+
+another way to caculate the Moran's I.
+
+```{r}
+df <- df %>%
+  mutate(gwr_model_resids = (gwr.model$SDF$gwr.e))
+#qtm(df, fill = "sem_model_knn_resids")
+
+gwrMoran <- df %>%
+  st_drop_geometry()%>%
+  dplyr::select(gwr_model_resids)%>%
+  pull()%>%
+  moran.test(., Lward.knn_4_weight)%>%
+  tidy()
+
+gwrMoran
+
+```
+
+save the results of GWR model
+
+```{r}
+results <- as.data.frame(gwr.model$SDF)
+names(results)
+
+#attach coefficients to original SF
+dfs <- df %>%
+  mutate(coefgreen = results$percent_green,
+         coefblue = results$percent_blue,
+         
+         )
+#run the significance test
+sigTest1 = abs(gwr.model$SDF$"percent_green")-2 * gwr.model$SDF$"percent_green_se"
+sigTest2 = abs(gwr.model$SDF$"percent_blue")-2 * gwr.model$SDF$"percent_blue_se"
+
+#store significance results
+dfs <- dfs %>%
+  mutate(GWRgreenSig = sigTest1)
+dfs <- dfs %>%
+  mutate(GWRblueSig = sigTest2)
+
+tm_shape(dfs) +
+  tm_polygons(col = "coefgreen", 
+              palette = "RdBu", 
+              alpha = 0.5)+
+  tm_layout(title = "(a) coefficient of green",
+            title.position = c("left","bottom"))
+tm_shape(dfs) +
+  tm_polygons(col = "coefblue", 
+              palette = "RdBu", 
+              alpha = 0.5)+
+  tm_layout(title = "(c) coefficient of blue",
+            title.position = c("left","bottom"))
+tm_shape(dfs) +
+  tm_polygons(col = "GWRgreenSig", 
+              palette = "RdYlBu")+
+  tm_layout(title = "(b) significance of green",
+            title.position = c("left","bottom"))
+tm_shape(dfs) +
+  tm_polygons(col = "GWRblueSig", 
+              palette = "RdYlBu")+
+  tm_layout(title = "(d) significance of blue",
+            title.position = c("left","bottom"))
+```
+
+
+
+
+
+
